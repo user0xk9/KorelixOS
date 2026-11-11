@@ -3,12 +3,14 @@
 #include <korelix/cpu.h>
 #include <korelix/log.h>
 #include <korelix/timer.h>
+#include <korelix/sched.h>
 
 static volatile uint64_t ticks;
 
 static void timer_handler(struct regs *r) {
     (void)r;
     ticks++;
+    sched_tick();       /* может переключить задачу */
 }
 
 uint64_t timer_ticks(void) { return ticks; }

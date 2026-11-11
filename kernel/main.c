@@ -11,6 +11,7 @@
 #include <korelix/apic.h>
 #include <korelix/timer.h>
 #include <korelix/keyboard.h>
+#include <korelix/sched.h>
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t base_revision[] = LIMINE_BASE_REVISION(3);
@@ -26,6 +27,26 @@ static volatile uint64_t requests_start[] = LIMINE_REQUESTS_START_MARKER;
 
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t requests_end[] = LIMINE_REQUESTS_END_MARKER;
+
+static void worker(void *arg) {
+    const char *name = arg;
+    for (int i = 0; i < 5; i++) {
+        kprintf("[%s] step %d, tick %lu\n", name, i, timer_ticks());
+        task_sleep_ms(500);
+    }
+    kprintf("[%s] finished\n", name);
+}
+
+/* Крутится без остановки: показывает, что вытеснение работает */
+static void spinner(void *arg) {
+    (void)arg;
+    volatile uint64_t n = 0;
+    for (;;) {
+        n++;
+        if ((n & 0x7FFFFFF) == 0)
+            kprintf("[spinner] n=%lu\n", (uint64_t)n);
+    }
+}
 
 void kmain(void) {
     serial_init();
@@ -99,8 +120,14 @@ void kmain(void) {
     acpi_init();
     lapic_init();
     ioapic_init();
-    timer_init(100);        /* 100 тиков в секунду */
+    timer_init(TIMER_HZ);
     kbd_init();
+
+    /* планировщик и тестовые потоки */
+    sched_init();
+    task_create("A", worker, "A");
+    task_create("B", worker, "B");
+    
 
     kprintf("Interrupts on. Click the QEMU window and type.\n");
     __asm__ volatile("sti");
@@ -110,11 +137,11 @@ void kmain(void) {
         int c = kbd_getc();
         if (c >= 0) kprintf("%c", c);
 
-        uint64_t sec = timer_ticks() / 100;
+        uint64_t sec = timer_ticks() / TIMER_HZ;
         if (sec != last_sec) {
             last_sec = sec;
             kprintf("[uptime %lu s]\n", sec);
         }
-        __asm__ volatile("hlt");        /* спим до следующего прерывания */
+        __asm__ volatile("hlt");
     }
 }

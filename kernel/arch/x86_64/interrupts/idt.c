@@ -62,15 +62,19 @@ void isr_handler(struct regs *r) {
     /* Аппаратные прерывания и всё, что выше 31 */
     if (r->vector >= 32) {
         if (r->vector == VEC_SPURIOUS) return;      /* ложное: EOI не нужен */
+
+        if (r->vector == VEC_TIMER) lapic_eoi();    /* до возможного переключения задач */
         if (irq_handlers[r->vector])
             irq_handlers[r->vector](r);
         else
             kprintf("Unhandled interrupt %lu\n", r->vector);
-        lapic_eoi();
+        if (r->vector != VEC_TIMER) lapic_eoi();
         return;
     }
 
     /* Исключения процессора */
+    log_enter_panic();      /* вывод без блокировок: вдруг упали внутри kprintf */
+
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 

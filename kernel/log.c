@@ -1,3 +1,4 @@
+#include <korelix/spinlock.h>
 #include <stdint.h>
 #include <korelix/log.h>
 #include <korelix/serial.h>
@@ -23,7 +24,7 @@ static void put_num(unsigned long long v, unsigned base, int neg) {
     while (i--) kputc(buf[i]);
 }
 
-void kvprintf(const char *fmt, va_list ap) {
+static void kvprintf_unlocked(const char *fmt, va_list ap) {
     for (; *fmt; fmt++) {
         if (*fmt != '%') { kputc(*fmt); continue; }
         fmt++;
@@ -77,4 +78,16 @@ void kprintf(const char *fmt, ...) {
     va_start(ap, fmt);
     kvprintf(fmt, ap);
     va_end(ap);
+}
+static spinlock_t log_lock = SPINLOCK_INIT;
+static volatile int panic_mode;
+
+/* В панике блокировки не берём: паника могла случиться внутри самого kprintf */
+void log_enter_panic(void) { panic_mode = 1; }
+
+void kvprintf(const char *fmt, va_list ap) {
+    if (panic_mode) { kvprintf_unlocked(fmt, ap); return; }
+    uint64_t f = spin_lock_irqsave(&log_lock);
+    kvprintf_unlocked(fmt, ap);
+    spin_unlock_irqrestore(&log_lock, f);
 }

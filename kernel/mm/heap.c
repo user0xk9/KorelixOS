@@ -4,6 +4,7 @@
 #include <korelix/mm.h>
 #include <korelix/log.h>
 #include <korelix/string.h>
+#include <korelix/spinlock.h>
 
 #define HEAP_START  0xffffd00000000000ULL
 #define HEAP_MAX    (HEAP_START + (1ULL << 30))   /* максимум 1 ГБ */
@@ -21,6 +22,7 @@ struct block {
 
 static struct block *head, *tail;
 static uint64_t heap_end = HEAP_START;
+static spinlock_t heap_lock = SPINLOCK_INIT;
 
 /* Отображаем новые страницы в конце кучи */
 static int grow(size_t bytes) {
@@ -81,7 +83,7 @@ static void *take(struct block *b, size_t size) {
     return b + 1;
 }
 
-void *kmalloc(size_t size) {
+static void *kmalloc_locked(size_t size) {
     if (size == 0 || size > HEAP_MAX - HEAP_START - sizeof(struct block))
         return NULL;
     size = ALIGN_UP(size, 16);
@@ -103,7 +105,7 @@ void *kzalloc(size_t size) {
     return p;
 }
 
-void kfree(void *ptr) {
+static void kfree_locked(void *ptr) {
     if (!ptr) return;
 
     uint64_t a = (uint64_t)ptr;
@@ -161,4 +163,16 @@ void heap_print(void) {
     }
     kprintf("heap: %lu KiB mapped, used %lu B, free %lu B, %lu blocks\n",
             (heap_end - HEAP_START) / 1024, used, freeb, blocks);
+}
+void *kmalloc(size_t size) {
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    void *p = kmalloc_locked(size);
+    spin_unlock_irqrestore(&heap_lock, f);
+    return p;
+}
+
+void kfree(void *ptr) {
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    kfree_locked(ptr);
+    spin_unlock_irqrestore(&heap_lock, f);
 }

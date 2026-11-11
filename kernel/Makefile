@@ -1,4 +1,5 @@
 .RECIPEPREFIX = >
+.SUFFIXES:
 
 CC      = gcc
 CFLAGS  = -std=gnu11 -O2 -g -Wall -Wextra -ffreestanding -fno-stack-protector \

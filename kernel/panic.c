@@ -2,6 +2,7 @@
 
 __attribute__((noreturn)) void panic(const char *fmt, ...) {
     __asm__ volatile("cli");
+        log_enter_panic();
     kprintf("\n=== KERNEL PANIC ===\n");
 
     va_list ap;

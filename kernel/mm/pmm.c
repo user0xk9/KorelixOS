@@ -4,6 +4,7 @@
 #include <korelix/mm.h>
 #include <korelix/log.h>
 #include <korelix/string.h>
+#include <korelix/spinlock.h>
 
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_memmap_request memmap_request = {
@@ -23,6 +24,7 @@ static uint8_t *bitmap;
 static uint64_t total_pages;
 static uint64_t free_pages;
 static uint64_t search_hint;
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static inline void mark_used(uint64_t i) { bitmap[i / 8] |=  (uint8_t)(1u << (i % 8)); }
 static inline void mark_free(uint64_t i) { bitmap[i / 8] &= (uint8_t)~(1u << (i % 8)); }
@@ -94,6 +96,9 @@ void pmm_init(void) {
 }
 
 uint64_t pmm_alloc(void) {
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    uint64_t result = 0;
+
     for (uint64_t n = 0; n < total_pages; n++) {
         uint64_t i = (search_hint + n) % total_pages;
         if (i % 8 == 0 && bitmap[i / 8] == 0xFF) { n += 7; continue; }
@@ -101,25 +106,28 @@ uint64_t pmm_alloc(void) {
             mark_used(i);
             free_pages--;
             search_hint = i + 1;
-            return i * PAGE_SIZE;
+            result = i * PAGE_SIZE;
+            break;
         }
     }
-    return 0;
+
+    spin_unlock_irqrestore(&pmm_lock, f);
+    return result;
 }
 
 void pmm_free(uint64_t phys) {
     uint64_t i = phys / PAGE_SIZE;
     if (phys % PAGE_SIZE || i == 0 || i >= total_pages)
         panic("pmm_free: bad address %lx", phys);
+
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
     if (!is_used(i))
         panic("pmm_free: double free of %lx", phys);
     mark_free(i);
     free_pages++;
     if (i < search_hint) search_hint = i;
+    spin_unlock_irqrestore(&pmm_lock, f);
 }
-
-uint64_t pmm_free_count(void)  { return free_pages; }
-uint64_t pmm_total_count(void) { return total_pages; }
 struct limine_memmap_response *boot_memmap(void) {
     return memmap_request.response;
 }
