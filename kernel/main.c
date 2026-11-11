@@ -5,6 +5,8 @@
 #include <korelix/log.h>
 #include <korelix/cpu.h>
 #include <korelix/mm.h>
+#include <korelix/heap.h>
+#include <korelix/string.h>
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t base_revision[] = LIMINE_BASE_REVISION(3);
@@ -53,6 +55,30 @@ void kmain(void) {
     kprintf("after unmap: translate = %lx (должно быть 0)\n",
             vmm_translate(kernel_pml4, test_va));
 
+    /* тест кучи */
+    heap_init();
+    heap_print();
+
+    void *p1 = kmalloc(100);
+    void *p2 = kmalloc(5000);
+    void *p3 = kmalloc(32);
+    kprintf("kmalloc: p1=%p p2=%p p3=%p\n", p1, p2, p3);
+    memset(p1, 0xAB, 100);
+
+    kfree(p2);
+    void *p4 = kmalloc(4000);   /* должен занять место p2 */
+    kprintf("reuse: p4=%p (p2 was %p)\n", p4, p2);
+
+    kfree(p1);
+    kfree(p3);
+    kfree(p4);
+    heap_print();               /* всё слилось: 1 блок, used 0 */
+
+    void *big = kmalloc(1024 * 1024);   /* больше начальной кучи: она вырастет */
+    kprintf("big: %p\n", big);
+    kfree(big);
+    heap_print();
+
     if (fb_request.response && fb_request.response->framebuffer_count > 0) {
         struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
         volatile uint32_t *px = fb->address;
@@ -62,7 +88,13 @@ void kmain(void) {
         kprintf("Framebuffer OK\n");
     }
 
-    
+    /* Тесты исключений: раскомментируй по одному, ядро после них паникует */
+    // __asm__ volatile("ud2");                          /* #UD */
+    // *(volatile int *)0 = 1;                           /* #PF, cr2=0 */
+    // *(volatile uint8_t *)(uintptr_t)kmain = 0;        /* #PF, error=3: W^X */
+     //void *x = kmalloc(16); kfree(x); kfree(x);        /* panic: double free */
+     //kfree((void *)0xffffd00000000123);
+
     kprintf("Boot complete, halting.\n");
     halt();
 }
