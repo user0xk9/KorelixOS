@@ -37,3 +37,10 @@ int      vmm_map_2m(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags
 void     vmm_unmap(uint64_t *pml4, uint64_t virt);
 uint64_t vmm_translate(uint64_t *pml4, uint64_t virt);   /* 0 = не отображено */
 void *vmm_map_mmio(uint64_t phys, uint64_t size);   /* отображение без кэша */
+/* ---- userspace ---- */
+#define USER_LIMIT 0x0000800000000000ULL
+
+uint64_t *vmm_create_address_space(void);
+void      vmm_destroy_address_space(uint64_t *pml4);
+void      vmm_load(uint64_t *pml4);
+int       vmm_user_ok(uint64_t *pml4, uint64_t addr, uint64_t len, int write);

@@ -157,6 +157,16 @@ void vmm_init(void) {
     map_kernel_range((uint64_t)__rodata_start, (uint64_t)__rodata_end, PTE_NX,               kvirt, kphys);
     map_kernel_range((uint64_t)__data_start,   (uint64_t)__data_end,   PTE_WRITE | PTE_NX,   kvirt, kphys);
 
+        /* Заранее создаём ветви верхней половины PML4: адресные пространства процессов
+     * копируют эти записи, и новых ветвей в ядре появляться уже не должно */
+    for (int i = 256; i < 512; i++) {
+        if (kernel_pml4[i] & PTE_PRESENT) continue;
+        uint64_t p = pmm_alloc();
+        if (!p) panic("vmm: out of memory for kernel PML4 entries");
+        memset(phys_to_virt(p), 0, PAGE_SIZE);
+        kernel_pml4[i] = p | PTE_PRESENT | PTE_WRITE;
+    }
+
     /* 3. Переключаемся на свои таблицы */
     uint64_t root_phys = (uint64_t)kernel_pml4 - hhdm_base;
     __asm__ volatile("mov %0, %%cr3" : : "r"(root_phys) : "memory");
@@ -175,4 +185,66 @@ void *vmm_map_mmio(uint64_t phys, uint64_t size) {
     }
     mmio_next += pages * PAGE_SIZE;
     return (void *)(virt + off);
+}
+void vmm_load(uint64_t *pml4) {
+    uint64_t phys = (uint64_t)pml4 - hhdm_base;
+    __asm__ volatile("mov %0, %%cr3" : : "r"(phys) : "memory");
+}
+
+/* Новое адресное пространство: нижняя половина пустая, верхняя (ядро) общая */
+uint64_t *vmm_create_address_space(void) {
+    uint64_t phys = pmm_alloc();
+    if (!phys) return NULL;
+    uint64_t *pml4 = phys_to_virt(phys);
+    memset(pml4, 0, PAGE_SIZE);
+    for (int i = 256; i < 512; i++)
+        pml4[i] = kernel_pml4[i];
+    return pml4;
+}
+
+/* Освобождает все страницы и таблицы нижней половины. Не вызывать для активного CR3. */
+static void free_user_table(uint64_t *table, int level) {
+    for (int i = 0; i < 512; i++) {
+        uint64_t e = table[i];
+        if (!(e & PTE_PRESENT)) continue;
+        uint64_t phys = e & PTE_ADDR_MASK;
+        if (level == 1)
+            pmm_free(phys);                                  /* страница данных процесса */
+        else if (!(e & PTE_HUGE))
+            free_user_table(phys_to_virt(phys), level - 1);
+    }
+    pmm_free((uint64_t)table - hhdm_base);
+}
+
+void vmm_destroy_address_space(uint64_t *pml4) {
+    for (int i = 0; i < 256; i++) {
+        uint64_t e = pml4[i];
+        if (e & PTE_PRESENT)
+            free_user_table(phys_to_virt(e & PTE_ADDR_MASK), 3);
+    }
+    pmm_free((uint64_t)pml4 - hhdm_base);
+}
+
+static uint64_t *leaf_entry(uint64_t *pml4, uint64_t virt) {
+    uint64_t *pdpt = next_level(pml4, (virt >> 39) & 0x1FF, 0, 0);
+    if (!pdpt) return NULL;
+    uint64_t *pd = next_level(pdpt, (virt >> 30) & 0x1FF, 0, 0);
+    if (!pd) return NULL;
+    uint64_t *pt = next_level(pd, (virt >> 21) & 0x1FF, 0, 0);
+    if (!pt) return NULL;
+    return &pt[(virt >> 12) & 0x1FF];
+}
+
+/* Можно ли безопасно читать (write=0) или писать (write=1) [addr, addr+len) из ядра */
+int vmm_user_ok(uint64_t *pml4, uint64_t addr, uint64_t len, int write) {
+    if (len == 0) return 1;
+    if (addr >= USER_LIMIT || len > USER_LIMIT - addr) return 0;
+
+    for (uint64_t p = ALIGN_DOWN(addr, PAGE_SIZE); p < addr + len; p += PAGE_SIZE) {
+        uint64_t *e = leaf_entry(pml4, p);
+        if (!e) return 0;
+        if ((*e & (PTE_PRESENT | PTE_USER)) != (PTE_PRESENT | PTE_USER)) return 0;
+        if (write && !(*e & PTE_WRITE)) return 0;
+    }
+    return 1;
 }

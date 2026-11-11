@@ -91,3 +91,9 @@ void kvprintf(const char *fmt, va_list ap) {
     kvprintf_unlocked(fmt, ap);
     spin_unlock_irqrestore(&log_lock, f);
 }
+/* Вывод буфера как есть (для sys_write) одной порцией, без перемешивания */
+void kwrite(const char *buf, size_t n) {
+    uint64_t f = spin_lock_irqsave(&log_lock);
+    for (size_t i = 0; i < n; i++) kputc(buf[i]);
+    spin_unlock_irqrestore(&log_lock, f);
+}

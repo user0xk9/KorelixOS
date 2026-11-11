@@ -1,0 +1,2 @@
+Welcome to KorelixOS!
+This file lives in the initramfs and is read by a ring 3 program.

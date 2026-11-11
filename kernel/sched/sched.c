@@ -5,21 +5,26 @@
 #include <korelix/timer.h>
 #include <korelix/heap.h>
 #include <korelix/string.h>
+#include <korelix/mm.h>
+#include <korelix/cpu.h>
 #include <korelix/log.h>
 
 extern void switch_context(uint64_t *old_rsp, uint64_t new_rsp);
+extern void enter_usermode(uint64_t rip, uint64_t rsp) __attribute__((noreturn));
+extern uint64_t syscall_kernel_rsp;
 
 static struct task boot_task;       /* поток, в котором запущен kmain */
 static struct task *current;
 static struct task *cursor;         /* последняя запущенная задача кольца */
-static struct task *idle_task;      /* вне кольца: запускается, когда больше нечего */
+static struct task *idle_task;
 static struct task *zombies;
 static uint64_t next_id = 1;
 static volatile int sched_ready;
+static uint64_t *active_pml4;       /* какое адресное пространство сейчас в CR3 */
 
 /* ---------- кольцо задач (вызывать с выключенными прерываниями) ---------- */
 
-static void ring_insert(struct task *t) {      /* в конец очереди: перед cursor */
+static void ring_insert(struct task *t) {
     if (!cursor) {
         t->next = t->prev = t;
         cursor = t;
@@ -42,12 +47,15 @@ static void ring_remove(struct task *t) {
     t->next = t->prev = NULL;
 }
 
-/* Освобождаем завершённые задачи. Стек задачи нельзя освободить, пока на нём
- * исполняется она сама, поэтому делаем это уже из контекста другой задачи. */
+/* Освобождаем завершённые задачи уже из контекста другой задачи:
+ * на её собственном стеке и в её адресном пространстве это делать нельзя. */
 static void reap(void) {
     while (zombies && zombies != current) {
         struct task *z = zombies;
         zombies = z->zombie_next;
+        for (int i = 0; i < MAX_FDS; i++)
+            if (z->fds[i]) kfree(z->fds[i]);
+        if (z->pml4) vmm_destroy_address_space(z->pml4);
         kstack_free(z->stack);
         kfree(z);
     }
@@ -58,13 +66,13 @@ static struct task *pick_next(void) {
 
     if (cursor) {
         struct task *t = cursor;
-        do {                                            /* будим тех, чей срок вышел */
+        do {
             if (t->state == TASK_SLEEPING && t->wake_tick <= now)
                 t->state = TASK_READY;
             t = t->next;
         } while (t != cursor);
 
-        t = cursor->next;                               /* round-robin: после последней */
+        t = cursor->next;
         for (;;) {
             if (t->state == TASK_READY || t->state == TASK_RUNNING)
                 return t;
@@ -73,6 +81,19 @@ static struct task *pick_next(void) {
         }
     }
     return idle_task;
+}
+
+/* Переключаем адресное пространство и стек для входов в ядро из ring 3 */
+static void prepare_switch(struct task *next) {
+    uint64_t *pml4 = next->pml4 ? next->pml4 : kernel_pml4;
+    if (pml4 != active_pml4) {
+        vmm_load(pml4);
+        active_pml4 = pml4;
+    }
+    if (next->kstack_top) {
+        tss_set_rsp0(next->kstack_top);          /* прерывания из ring 3 */
+        syscall_kernel_rsp = next->kstack_top;   /* инструкция syscall */
+    }
 }
 
 void schedule(void) {
@@ -86,6 +107,9 @@ void schedule(void) {
         next->state = TASK_RUNNING;
         if (next != idle_task) cursor = next;
         current = next;
+        prepare_switch(next);
+        fpu_save(prev->fpu);                     /* состояние FPU/SSE уходящей задачи */
+        fpu_restore(next->fpu);                  /* и входящей */
         switch_context(&prev->rsp, next->rsp);
         /* сюда вернёмся, когда prev снова выберут */
     }
@@ -128,7 +152,7 @@ struct task *task_current(void) { return current; }
 
 static void task_trampoline(void) {
     reap();
-    __asm__ volatile("sti");                     /* новая задача стартует с прерываниями */
+    __asm__ volatile("sti");
     current->entry(current->arg);
     task_exit();
 }
@@ -150,10 +174,12 @@ static struct task *make_task(const char *name, void (*entry)(void *), void *arg
     t->entry = entry;
     t->arg = arg;
     t->state = TASK_READY;
+    t->kstack_top = (uint64_t)t->stack + KSTACK_SIZE;
+    memcpy(t->fpu, fpu_initial, sizeof(t->fpu));  /* чистое состояние FPU/SSE */
 
-    /* Готовим стек так, будто задача уже вызывала switch_context:
+    /* Стек выглядит так, будто задача уже вызывала switch_context:
      * 6 регистров, затем адрес возврата = trampoline (выровнено под ABI). */
-    uint64_t *sp = (uint64_t *)((uint64_t)t->stack + KSTACK_SIZE);
+    uint64_t *sp = (uint64_t *)t->kstack_top;
     *--sp = 0;                                   /* фиктивный адрес возврата trampoline */
     *--sp = (uint64_t)task_trampoline;           /* сюда уйдёт ret */
     for (int i = 0; i < 6; i++) *--sp = 0;       /* rbp rbx r12 r13 r14 r15 */
@@ -172,6 +198,30 @@ struct task *task_create(const char *name, void (*entry)(void *), void *arg) {
     return t;
 }
 
+/* Поток ядра процесса: сразу прыгает в ring 3 */
+static void user_entry(void *arg) {
+    (void)arg;
+    enter_usermode(current->user_rip, current->user_rsp);
+}
+
+/* Возвращает pid или -1. Указатель наружу не отдаём: после вставки в кольцо
+ * задача может успеть завершиться и быть освобождена. */
+long task_create_user(const char *name, uint64_t *pml4, uint64_t rip, uint64_t rsp) {
+    struct task *t = make_task(name, user_entry, NULL);
+    if (!t) return -1;
+
+    t->pml4 = pml4;
+    t->user_rip = rip;
+    t->user_rsp = rsp;
+
+    uint64_t f = irq_save();
+    t->id = next_id++;
+    long id = (long)t->id;
+    ring_insert(t);
+    irq_restore(f);
+    return id;
+}
+
 static void idle_entry(void *arg) {
     (void)arg;
     for (;;) __asm__ volatile("sti; hlt");
@@ -180,8 +230,9 @@ static void idle_entry(void *arg) {
 void sched_init(void) {
     memset(&boot_task, 0, sizeof(boot_task));
     set_name(&boot_task, "main");
-    boot_task.state = TASK_RUNNING;             /* текущий поток становится задачей №0 */
+    boot_task.state = TASK_RUNNING;
     current = &boot_task;
+    active_pml4 = kernel_pml4;
     ring_insert(&boot_task);
 
     idle_task = make_task("idle", idle_entry, NULL);

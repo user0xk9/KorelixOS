@@ -2,6 +2,7 @@
 #include <korelix/cpu.h>
 #include <korelix/apic.h>
 #include <korelix/log.h>
+#include <korelix/sched.h>
 
 struct idt_entry {
     uint16_t off_lo;
@@ -72,11 +73,19 @@ void isr_handler(struct regs *r) {
         return;
     }
 
-    /* Исключения процессора */
-    log_enter_panic();      /* вывод без блокировок: вдруг упали внутри kprintf */
-
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+
+    /* Исключение в пользовательской программе: убиваем процесс, ядро живёт дальше */
+    if ((r->cs & 3) == 3) {
+        struct task *t = task_current();
+        kprintf("[kernel] process %lu (%s) killed: %s at rip=%lx (error=%lx, cr2=%lx)\n",
+                t->id, t->name, names[r->vector], r->rip, r->error, cr2);
+        task_exit();
+    }
+
+    /* Исключение в самом ядре: паника */
+    log_enter_panic();
 
     kprintf("\n*** EXCEPTION %lu: %s ***\n", r->vector, names[r->vector]);
     kprintf("error=%lx rip=%lx cs=%lx rflags=%lx\n", r->error, r->rip, r->cs, r->rflags);

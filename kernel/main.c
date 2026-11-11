@@ -12,6 +12,8 @@
 #include <korelix/timer.h>
 #include <korelix/keyboard.h>
 #include <korelix/sched.h>
+#include <korelix/syscall.h>
+#include <korelix/vfs.h>
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t base_revision[] = LIMINE_BASE_REVISION(3);
@@ -22,31 +24,17 @@ static volatile struct limine_framebuffer_request fb_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_module_request module_request = {
+    .id = LIMINE_MODULE_REQUEST_ID,
+    .revision = 0
+};
+
 __attribute__((used, section(".limine_requests_start")))
 static volatile uint64_t requests_start[] = LIMINE_REQUESTS_START_MARKER;
 
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t requests_end[] = LIMINE_REQUESTS_END_MARKER;
-
-static void worker(void *arg) {
-    const char *name = arg;
-    for (int i = 0; i < 5; i++) {
-        kprintf("[%s] step %d, tick %lu\n", name, i, timer_ticks());
-        task_sleep_ms(500);
-    }
-    kprintf("[%s] finished\n", name);
-}
-
-/* Крутится без остановки: показывает, что вытеснение работает */
-static void spinner(void *arg) {
-    (void)arg;
-    volatile uint64_t n = 0;
-    for (;;) {
-        n++;
-        if ((n & 0x7FFFFFF) == 0)
-            kprintf("[spinner] n=%lu\n", (uint64_t)n);
-    }
-}
 
 void kmain(void) {
     serial_init();
@@ -58,47 +46,9 @@ void kmain(void) {
     kprintf("IDT OK\n");
 
     pmm_init();
-
     vmm_init();
     kprintf("VMM: now on own page tables\n");
-
-    /* тест VMM: отображаем свежую страницу по новому виртуальному адресу */
-    uint64_t page = pmm_alloc();
-    uint64_t test_va = 0xffffc00000000000ULL;
-    vmm_map(kernel_pml4, test_va, page, PTE_WRITE | PTE_NX);
-    *(volatile uint64_t *)test_va = 0x1234abcd;
-    kprintf("virt %lx -> phys %lx (page was %lx)\n",
-            test_va, vmm_translate(kernel_pml4, test_va), page);
-    kprintf("same page via HHDM: %lx\n", *(volatile uint64_t *)phys_to_virt(page));
-
-    vmm_unmap(kernel_pml4, test_va);
-    pmm_free(page);
-    kprintf("after unmap: translate = %lx (должно быть 0)\n",
-            vmm_translate(kernel_pml4, test_va));
-
-    /* тест кучи */
     heap_init();
-    heap_print();
-
-    void *p1 = kmalloc(100);
-    void *p2 = kmalloc(5000);
-    void *p3 = kmalloc(32);
-    kprintf("kmalloc: p1=%p p2=%p p3=%p\n", p1, p2, p3);
-    memset(p1, 0xAB, 100);
-
-    kfree(p2);
-    void *p4 = kmalloc(4000);   /* должен занять место p2 */
-    kprintf("reuse: p4=%p (p2 was %p)\n", p4, p2);
-
-    kfree(p1);
-    kfree(p3);
-    kfree(p4);
-    heap_print();               /* всё слилось: 1 блок, used 0 */
-
-    void *big = kmalloc(1024 * 1024);   /* больше начальной кучи: она вырастет */
-    kprintf("big: %p\n", big);
-    kfree(big);
-    heap_print();
 
     if (fb_request.response && fb_request.response->framebuffer_count > 0) {
         struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
@@ -109,12 +59,6 @@ void kmain(void) {
         kprintf("Framebuffer OK\n");
     }
 
-    /* Тесты исключений: раскомментируй по одному, ядро после них паникует */
-    // __asm__ volatile("ud2");                          /* #UD */
-    // *(volatile int *)0 = 1;                           /* #PF, cr2=0 */
-    // *(volatile uint8_t *)(uintptr_t)kmain = 0;        /* #PF, error=3: W^X */
-    // void *x = kmalloc(16); kfree(x); kfree(x);        /* panic: double free */
-
     /* прерывания, таймер, клавиатура */
     pic_disable();
     acpi_init();
@@ -123,11 +67,26 @@ void kmain(void) {
     timer_init(TIMER_HZ);
     kbd_init();
 
-    /* планировщик и тестовые потоки */
+    /* userspace */
+    fpu_init();
+    cpu_enable_protections();
+    syscall_init();
     sched_init();
-    task_create("A", worker, "A");
-    task_create("B", worker, "B");
-    
+
+    /* корневая файловая система из модуля initrd.tar */
+    if (!module_request.response || module_request.response->module_count == 0)
+        panic("No initrd module from the bootloader");
+    struct limine_file *rd = module_request.response->modules[0];
+
+    vfs_init();
+    int nfiles = initramfs_mount(rd->address, rd->size);
+    if (nfiles < 0) panic("initramfs: bad archive");
+    kprintf("initramfs: %d files (%lu bytes)\n", nfiles, (uint64_t)rd->size);
+
+    struct vnode *init = vfs_lookup("/bin/init");
+    if (!init || init->type != VFS_FILE) panic("/bin/init not found in initramfs");
+    if (process_spawn("init", init->data, init->size) < 0)
+        panic("cannot start /bin/init");
 
     kprintf("Interrupts on. Click the QEMU window and type.\n");
     __asm__ volatile("sti");

@@ -70,3 +70,6 @@ void gdt_init(void) {
     gdt_load(&r);
     __asm__ volatile("ltr %w0" : : "r"((uint16_t)0x28));
 }
+void tss_set_rsp0(uint64_t rsp0) {
+    tss.rsp[0] = rsp0;      /* стек, на который процессор перейдёт при прерывании из ring 3 */
+}
