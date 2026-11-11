@@ -11,12 +11,17 @@ PHDRS {
 SECTIONS {
     . = 0xffffffff80000000;
 
+    __text_start = .;
     .text : { *(.text .text.*) } :text
+    __text_end = .;
 
     . = ALIGN(4K);
+    __rodata_start = .;
     .rodata : { *(.rodata .rodata.*) } :rodata
+    __rodata_end = .;
 
     . = ALIGN(4K);
+    __data_start = .;
     .data : {
         *(.data .data.*)
         KEEP(*(.limine_requests_start))
@@ -28,6 +33,7 @@ SECTIONS {
         *(.bss .bss.*)
         *(COMMON)
     } :data
+    __data_end = .;
 
     /DISCARD/ : { *(.eh_frame*) *(.note .note.*) }
 }
