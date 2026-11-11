@@ -5,7 +5,7 @@ global isr_stub_table
 section .text
 
 %assign i 0
-%rep 32
+%rep 256
 isr%+i:
 %if i = 8 || (i >= 10 && i <= 14) || i = 17 || i = 21 || i = 29 || i = 30
     ; CPU сам положил код ошибки
@@ -57,7 +57,7 @@ isr_common:
 section .rodata
 isr_stub_table:
 %assign i 0
-%rep 32
+%rep 256
     dq isr%+i
 %assign i i+1
 %endrep

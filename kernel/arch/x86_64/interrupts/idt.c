@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <korelix/cpu.h>
+#include <korelix/apic.h>
 #include <korelix/log.h>
 
 struct idt_entry {
@@ -18,7 +19,8 @@ struct idtr {
 } __attribute__((packed));
 
 static struct idt_entry idt[256];
-extern uint64_t isr_stub_table[32];
+static void (*irq_handlers[256])(struct regs *);
+extern uint64_t isr_stub_table[256];
 
 static const char *names[32] = {
     "Divide Error", "Debug", "NMI", "Breakpoint", "Overflow",
@@ -44,15 +46,31 @@ static void set_gate(int n, uint64_t handler, uint8_t ist) {
     };
 }
 
+void irq_register(uint8_t vector, void (*handler)(struct regs *)) {
+    irq_handlers[vector] = handler;
+}
+
 void idt_init(void) {
-    for (int i = 0; i < 32; i++)
-        set_gate(i, isr_stub_table[i], i == 8 ? 1 : 0);  /* #DF на своём стеке */
+    for (int i = 0; i < 256; i++)
+        set_gate(i, isr_stub_table[i], i == 8 ? 1 : 0);   /* #DF на своём стеке */
 
     struct idtr r = { sizeof(idt) - 1, (uint64_t)&idt };
     __asm__ volatile("lidt %0" : : "m"(r));
 }
 
 void isr_handler(struct regs *r) {
+    /* Аппаратные прерывания и всё, что выше 31 */
+    if (r->vector >= 32) {
+        if (r->vector == VEC_SPURIOUS) return;      /* ложное: EOI не нужен */
+        if (irq_handlers[r->vector])
+            irq_handlers[r->vector](r);
+        else
+            kprintf("Unhandled interrupt %lu\n", r->vector);
+        lapic_eoi();
+        return;
+    }
+
+    /* Исключения процессора */
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 

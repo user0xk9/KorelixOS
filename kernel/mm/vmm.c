@@ -161,3 +161,18 @@ void vmm_init(void) {
     uint64_t root_phys = (uint64_t)kernel_pml4 - hhdm_base;
     __asm__ volatile("mov %0, %%cr3" : : "r"(root_phys) : "memory");
 }
+static uint64_t mmio_next = 0xffffe00000000000ULL;
+
+void *vmm_map_mmio(uint64_t phys, uint64_t size) {
+    uint64_t off   = phys & (PAGE_SIZE - 1);
+    uint64_t pages = ALIGN_UP(size + off, PAGE_SIZE) / PAGE_SIZE;
+    uint64_t virt  = mmio_next;
+
+    for (uint64_t i = 0; i < pages; i++) {
+        if (vmm_map(kernel_pml4, virt + i * PAGE_SIZE, (phys - off) + i * PAGE_SIZE,
+                    PTE_WRITE | PTE_NX | PTE_PCD | PTE_PWT))
+            panic("vmm_map_mmio: out of memory");
+    }
+    mmio_next += pages * PAGE_SIZE;
+    return (void *)(virt + off);
+}

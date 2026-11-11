@@ -36,3 +36,4 @@ int      vmm_map(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 int      vmm_map_2m(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 void     vmm_unmap(uint64_t *pml4, uint64_t virt);
 uint64_t vmm_translate(uint64_t *pml4, uint64_t virt);   /* 0 = не отображено */
+void *vmm_map_mmio(uint64_t phys, uint64_t size);   /* отображение без кэша */

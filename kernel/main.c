@@ -7,6 +7,10 @@
 #include <korelix/mm.h>
 #include <korelix/heap.h>
 #include <korelix/string.h>
+#include <korelix/acpi.h>
+#include <korelix/apic.h>
+#include <korelix/timer.h>
+#include <korelix/keyboard.h>
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t base_revision[] = LIMINE_BASE_REVISION(3);
@@ -22,10 +26,6 @@ static volatile uint64_t requests_start[] = LIMINE_REQUESTS_START_MARKER;
 
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t requests_end[] = LIMINE_REQUESTS_END_MARKER;
-
-static void halt(void) {
-    for (;;) __asm__ volatile("hlt");
-}
 
 void kmain(void) {
     serial_init();
@@ -92,9 +92,29 @@ void kmain(void) {
     // __asm__ volatile("ud2");                          /* #UD */
     // *(volatile int *)0 = 1;                           /* #PF, cr2=0 */
     // *(volatile uint8_t *)(uintptr_t)kmain = 0;        /* #PF, error=3: W^X */
-     //void *x = kmalloc(16); kfree(x); kfree(x);        /* panic: double free */
-     //kfree((void *)0xffffd00000000123);
+    // void *x = kmalloc(16); kfree(x); kfree(x);        /* panic: double free */
 
-    kprintf("Boot complete, halting.\n");
-    halt();
+    /* прерывания, таймер, клавиатура */
+    pic_disable();
+    acpi_init();
+    lapic_init();
+    ioapic_init();
+    timer_init(100);        /* 100 тиков в секунду */
+    kbd_init();
+
+    kprintf("Interrupts on. Click the QEMU window and type.\n");
+    __asm__ volatile("sti");
+
+    uint64_t last_sec = 0;
+    for (;;) {
+        int c = kbd_getc();
+        if (c >= 0) kprintf("%c", c);
+
+        uint64_t sec = timer_ticks() / 100;
+        if (sec != last_sec) {
+            last_sec = sec;
+            kprintf("[uptime %lu s]\n", sec);
+        }
+        __asm__ volatile("hlt");        /* спим до следующего прерывания */
+    }
 }

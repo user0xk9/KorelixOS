@@ -11,3 +11,4 @@ struct regs {
 
 void gdt_init(void);
 void idt_init(void);
+void irq_register(uint8_t vector, void (*handler)(struct regs *));
