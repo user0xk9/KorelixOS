@@ -5,9 +5,9 @@
 #include <korelix/keyboard.h>
 
 /* Раскладка US, scancode set 1 (индекс = скан-код нажатия) */
-static const char lower[58] =
+static const char lower[] =
     "\0\033" "1234567890-=\b\t" "qwertyuiop[]\n\0" "asdfghjkl;'`\0\\" "zxcvbnm,./\0*\0 ";
-static const char upper[58] =
+static const char upper[] =
     "\0\033" "!@#$%^&*()_+\b\t" "QWERTYUIOP{}\n\0" "ASDFGHJKL:\"~\0|" "ZXCVBNM<>?\0*\0 ";
 
 static volatile uint8_t buf[256];
@@ -41,7 +41,7 @@ static void kbd_handler(struct regs *r) {
     if (sc == 0x2A || sc == 0x36) { shift = !release; return; }
     if (release) return;
     if (sc == 0x3A) { caps = !caps; return; }
-    if (sc >= sizeof(lower)) return;
+    if (sc >= sizeof(lower) - 1) return;   /* -1: завершающий NUL строки не клавиша */
 
     char c = shift ? upper[sc] : lower[sc];
     if (caps && lower[sc] >= 'a' && lower[sc] <= 'z')

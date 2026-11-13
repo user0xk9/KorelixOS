@@ -6,11 +6,21 @@
 #define SYS_WRITE    1
 #define SYS_GETPID   2
 #define SYS_SLEEP_MS 3
-#define SYS_OPEN     4
+#define SYS_OPEN     4    /* (путь, флаги) -> fd */
 #define SYS_READ     5
 #define SYS_CLOSE    6
-#define SYS_READDIR  7
-#define SYS_SPAWN    8
+#define SYS_READDIR  7    /* (fd, индекс, &dirent) */
+#define SYS_SPAWN    8    /* (путь, argv, stdin_fd, stdout_fd) -> pid; -1 = унаследовать */
+#define SYS_WAIT     9    /* (pid, &status) */
+#define SYS_MKDIR    10   /* (путь) */
+#define SYS_UNLINK   11   /* (путь) удалить файл */
+#define SYS_RMDIR    12   /* (путь) удалить пустой каталог */
+#define SYS_RENAME   13   /* (старый, новый) */
+#define SYS_CHDIR    14   /* (путь) */
+#define SYS_GETCWD   15   /* (буфер, размер) -> длина пути */
+#define SYS_LSEEK    16   /* (fd, смещение, откуда) -> новая позиция */
+#define SYS_STAT     17   /* (путь, &user_stat) */
+#define SYS_FSINFO   18   /* (&user_fsinfo) */
 
 /* Порядок полей = порядок push в syscall_entry */
 struct syscall_frame {

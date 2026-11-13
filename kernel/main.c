@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <limine.h>
 #include <korelix/serial.h>
+#include <korelix/fb.h>
 #include <korelix/log.h>
 #include <korelix/cpu.h>
 #include <korelix/mm.h>
@@ -19,12 +20,6 @@ __attribute__((used, section(".limine_requests")))
 static volatile uint64_t base_revision[] = LIMINE_BASE_REVISION(3);
 
 __attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request fb_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
-    .revision = 0
-};
-
-__attribute__((used, section(".limine_requests")))
 static volatile struct limine_module_request module_request = {
     .id = LIMINE_MODULE_REQUEST_ID,
     .revision = 0
@@ -38,6 +33,7 @@ static volatile uint64_t requests_end[] = LIMINE_REQUESTS_END_MARKER;
 
 void kmain(void) {
     serial_init();
+    fb_init();                      /* вывод на экран: всё, что ниже, видно и в serial, и на экране */
     kprintf("Hello from KorelixOS!\n");
 
     gdt_init();
@@ -49,15 +45,6 @@ void kmain(void) {
     vmm_init();
     kprintf("VMM: now on own page tables\n");
     heap_init();
-
-    if (fb_request.response && fb_request.response->framebuffer_count > 0) {
-        struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
-        volatile uint32_t *px = fb->address;
-        for (uint64_t y = 0; y < 100; y++)
-            for (uint64_t x = 0; x < 100; x++)
-                px[y * (fb->pitch / 4) + x] = 0x00FF8800;
-        kprintf("Framebuffer OK\n");
-    }
 
     /* прерывания, таймер, клавиатура */
     pic_disable();
@@ -73,7 +60,7 @@ void kmain(void) {
     syscall_init();
     sched_init();
 
-    /* корневая файловая система из модуля initrd.tar */
+        /* корневая файловая система из модуля initrd.tar */
     if (!module_request.response || module_request.response->module_count == 0)
         panic("No initrd module from the bootloader");
     struct limine_file *rd = module_request.response->modules[0];
@@ -83,24 +70,18 @@ void kmain(void) {
     if (nfiles < 0) panic("initramfs: bad archive");
     kprintf("initramfs: %d files (%lu bytes)\n", nfiles, (uint64_t)rd->size);
 
-    struct vnode *init = vfs_lookup("/bin/init");
-    if (!init || init->type != VFS_FILE) panic("/bin/init not found in initramfs");
-    if (process_spawn("init", init->data, init->size) < 0)
+    void *init_img;
+    size_t init_size;
+    if (vfs_read_whole(NULL, "/bin/init", &init_img, &init_size))
+        panic("/bin/init not found in initramfs");
+    const char *init_argv[] = { "init" };
+    if (process_spawn("init", init_img, init_size, 1, init_argv, NULL) < 0)
         panic("cannot start /bin/init");
+    kfree(init_img);
 
-    kprintf("Interrupts on. Click the QEMU window and type.\n");
+    kprintf("Interrupts on.\n");
     __asm__ volatile("sti");
 
-    uint64_t last_sec = 0;
-    for (;;) {
-        int c = kbd_getc();
-        if (c >= 0) kprintf("%c", c);
-
-        uint64_t sec = timer_ticks() / TIMER_HZ;
-        if (sec != last_sec) {
-            last_sec = sec;
-            kprintf("[uptime %lu s]\n", sec);
-        }
-        __asm__ volatile("hlt");
-    }
+    /* Главный поток больше не читает клавиатуру (это делает консоль): просто спит */
+    for (;;) __asm__ volatile("hlt");
 }

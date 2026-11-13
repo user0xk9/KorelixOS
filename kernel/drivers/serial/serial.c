@@ -34,3 +34,7 @@ void serial_write(const char *s) {
         serial_putc(*s);
     }
 }
+int serial_getc(void) {
+    if (!(inb(COM1 + 5) & 1)) return -1;      /* данных нет */
+    return inb(COM1);
+}

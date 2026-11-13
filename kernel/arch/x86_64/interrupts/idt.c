@@ -81,7 +81,7 @@ void isr_handler(struct regs *r) {
         struct task *t = task_current();
         kprintf("[kernel] process %lu (%s) killed: %s at rip=%lx (error=%lx, cr2=%lx)\n",
                 t->id, t->name, names[r->vector], r->rip, r->error, cr2);
-        task_exit();
+        task_exit_status(128 + (long)r->vector);
     }
 
     /* Исключение в самом ядре: паника */

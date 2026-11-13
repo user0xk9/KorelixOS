@@ -1,0 +1,6 @@
+# Запуск из корня проекта: gdb -q -x scripts/gdbinit
+file kernel/kernel.elf
+set disassembly-flavor intel
+target remote localhost:1234
+hbreak kmain
+continue

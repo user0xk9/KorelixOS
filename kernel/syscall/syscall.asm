@@ -57,7 +57,8 @@ syscall_entry:
     pop rsp
     o64 sysret
 
-; void enter_usermode(uint64_t rip, uint64_t rsp)
+; void enter_usermode(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2)
+; rdi = rip, rsi = rsp, rdx = arg1 (-> rdi), rcx = arg2 (-> rsi).
 ; Строит кадр для iretq: SS=0x1B, RSP, RFLAGS (IF=1), CS=0x23, RIP
 enter_usermode:
     push 0x1B
@@ -66,12 +67,13 @@ enter_usermode:
     push 0x23
     push rdi
 
-    xor eax, eax             ; не отдаём пользователю значения регистров ядра
+    mov rdi, rdx             ; argc
+    mov rsi, rcx             ; argv
+
+    xor eax, eax             ; остальное не отдаём пользователю
     xor ebx, ebx
     xor ecx, ecx
     xor edx, edx
-    xor esi, esi
-    xor edi, edi
     xor ebp, ebp
     xor r8d, r8d
     xor r9d, r9d

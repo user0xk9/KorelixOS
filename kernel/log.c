@@ -2,10 +2,12 @@
 #include <stdint.h>
 #include <korelix/log.h>
 #include <korelix/serial.h>
+#include <korelix/fb.h>
 
 static void kputc(char c) {
     if (c == '\n') serial_putc('\r');
     serial_putc(c);
+    fbcon_putc(c);
 }
 
 static void kputs(const char *s) {
@@ -83,17 +85,19 @@ static spinlock_t log_lock = SPINLOCK_INIT;
 static volatile int panic_mode;
 
 /* В панике блокировки не берём: паника могла случиться внутри самого kprintf */
-void log_enter_panic(void) { panic_mode = 1; }
+void log_enter_panic(void) { panic_mode = 1; fbcon_panic_mode(); }
 
 void kvprintf(const char *fmt, va_list ap) {
-    if (panic_mode) { kvprintf_unlocked(fmt, ap); return; }
+    if (panic_mode) { kvprintf_unlocked(fmt, ap); fbcon_flush(); return; }
     uint64_t f = spin_lock_irqsave(&log_lock);
     kvprintf_unlocked(fmt, ap);
+    fbcon_flush();
     spin_unlock_irqrestore(&log_lock, f);
 }
 /* Вывод буфера как есть (для sys_write) одной порцией, без перемешивания */
 void kwrite(const char *buf, size_t n) {
     uint64_t f = spin_lock_irqsave(&log_lock);
     for (size_t i = 0; i < n; i++) kputc(buf[i]);
+    fbcon_flush();
     spin_unlock_irqrestore(&log_lock, f);
 }

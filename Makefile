@@ -2,7 +2,7 @@
 
 ISO = build/korelix.iso
 INITRD = build/initrd.tar
-OVMF = /usr/share/edk2/x64/OVMF_CODE.4m.fd
+LIMINE_DIR ?= /usr/share/limine
 
 all: $(ISO)
 
@@ -12,13 +12,12 @@ kernel:
 userland:
 > $(MAKE) -C userland
 
-# Корневая ФС: статические файлы из initrd/ + собранные программы в /bin
+# Корневая ФС: статические файлы из initrd/ + все собранные программы в /bin
 $(INITRD): userland $(shell find initrd -type f)
 > rm -rf build/rootfs
 > mkdir -p build/rootfs/bin build/rootfs/etc
 > cp -r initrd/. build/rootfs/
-> cp userland/init/init.elf build/rootfs/bin/init
-> cp userland/fpu/fpu.elf build/rootfs/bin/fpu
+> for f in userland/*/*.elf; do cp $$f build/rootfs/bin/$$(basename $$f .elf); done
 > tar --format=ustar --owner=0 --group=0 -cf $@ -C build/rootfs .
 
 $(ISO): kernel $(INITRD) boot/limine/limine.conf
@@ -27,19 +26,26 @@ $(ISO): kernel $(INITRD) boot/limine/limine.conf
 > cp kernel/kernel.elf build/iso/boot/kernel
 > cp $(INITRD) build/iso/boot/initrd.tar
 > cp boot/limine/limine.conf build/iso/boot/limine/
-> cp /usr/share/limine/limine-uefi-cd.bin build/iso/boot/limine/
-> cp /usr/share/limine/BOOTX64.EFI build/iso/EFI/BOOT/
+> cp $(LIMINE_DIR)/limine-uefi-cd.bin build/iso/boot/limine/
+> cp $(LIMINE_DIR)/BOOTX64.EFI build/iso/EFI/BOOT/
 > xorriso -as mkisofs -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin \
 >   -efi-boot-part --efi-boot-image --protective-msdos-label build/iso -o $@
 
-run: $(ISO)
-> qemu-system-x86_64 -M q35 -cpu max -m 512M \
->   -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
->   -cdrom $(ISO) -serial stdio
+# Запуск и отладка в QEMU: подробности в scripts/run.sh и scripts/debug.sh
+run:
+> scripts/run.sh
+
+debug:
+> scripts/debug.sh
+
+# Хостовые тесты (ASan + UBSan): string, initramfs/VFS, консоль на framebuffer
+test:
+> $(MAKE) -C tests
 
 clean:
 > $(MAKE) -C kernel clean
 > $(MAKE) -C userland clean
+> $(MAKE) -C tests clean
 > rm -rf build
 
-.PHONY: all kernel userland run clean
+.PHONY: all kernel userland run debug test clean

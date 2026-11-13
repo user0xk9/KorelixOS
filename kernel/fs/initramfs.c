@@ -64,9 +64,9 @@ int initramfs_mount(const void *tar, size_t total) {
         path[pos] = 0;
 
         if (h->typeflag == '0' || h->typeflag == 0) {
-            if (vfs_create(path, VFS_FILE, data, (size_t)size)) files++;
+            if (vfs_install(path, VFS_FILE, data, (size_t)size)) files++;
         } else if (h->typeflag == '5') {
-            vfs_create(path, VFS_DIR, NULL, 0);
+            vfs_install(path, VFS_DIR, NULL, 0);
         }                                                 /* остальные типы пропускаем */
 
         off += 512 + ALIGN_UP(size, 512);

@@ -1,27 +1,32 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Копирование через rep movsb/stosb: быстро на современных CPU (ERMS/FSRM) и
+ * не превращается компилятором в рекурсивный вызов самого себя. */
+
 void *memcpy(void *dest, const void *src, size_t n) {
-    uint8_t *d = dest;
-    const uint8_t *s = src;
-    for (size_t i = 0; i < n; i++) d[i] = s[i];
-    return dest;
+    void *ret = dest;
+    __asm__ volatile("rep movsb" : "+D"(dest), "+S"(src), "+c"(n) : : "memory");
+    return ret;
 }
 
 void *memset(void *s, int c, size_t n) {
-    uint8_t *p = s;
-    for (size_t i = 0; i < n; i++) p[i] = (uint8_t)c;
-    return s;
+    void *ret = s;
+    __asm__ volatile("rep stosb" : "+D"(s), "+c"(n) : "a"(c) : "memory");
+    return ret;
 }
 
 void *memmove(void *dest, const void *src, size_t n) {
     uint8_t *d = dest;
     const uint8_t *s = src;
-    if (d < s) {
-        for (size_t i = 0; i < n; i++) d[i] = s[i];
-    } else if (d > s) {
-        for (size_t i = n; i > 0; i--) d[i - 1] = s[i - 1];
-    }
+    if (d == s || n == 0) return dest;
+    if (d < s || d >= s + n)            /* вперёд безопасно */
+        return memcpy(dest, src, n);
+
+    /* перекрытие с d > s: копируем с конца (DF=1), обработчики прерываний делают cld */
+    d += n - 1;
+    s += n - 1;
+    __asm__ volatile("std; rep movsb; cld" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
     return dest;
 }
 

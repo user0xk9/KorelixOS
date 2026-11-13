@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <korelix/sched.h>
+#include <korelix/vfs.h>
 #include <korelix/spinlock.h>
 #include <korelix/timer.h>
 #include <korelix/heap.h>
@@ -10,7 +11,8 @@
 #include <korelix/log.h>
 
 extern void switch_context(uint64_t *old_rsp, uint64_t new_rsp);
-extern void enter_usermode(uint64_t rip, uint64_t rsp) __attribute__((noreturn));
+extern void enter_usermode(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2)
+    __attribute__((noreturn));
 extern uint64_t syscall_kernel_rsp;
 
 static struct task boot_task;       /* поток, в котором запущен kmain */
@@ -21,6 +23,13 @@ static struct task *zombies;
 static uint64_t next_id = 1;
 static volatile int sched_ready;
 static uint64_t *active_pml4;       /* какое адресное пространство сейчас в CR3 */
+
+/* Коды завершения последних процессов: wait() находит их, даже если процесс
+ * успел завершиться до вызова wait. При переполнении старые записи затираются. */
+#define EXIT_TABLE 64
+struct exit_info { uint64_t pid; long status; };
+static struct exit_info exits[EXIT_TABLE];
+static unsigned exit_next;
 
 /* ---------- кольцо задач (вызывать с выключенными прерываниями) ---------- */
 
@@ -47,6 +56,26 @@ static void ring_remove(struct task *t) {
     t->next = t->prev = NULL;
 }
 
+static struct task *find_task(uint64_t id) {
+    if (!cursor) return NULL;
+    struct task *t = cursor;
+    do {
+        if (t->id == id) return t;
+        t = t->next;
+    } while (t != cursor);
+    return NULL;
+}
+
+static struct exit_info *find_exit(uint64_t pid) {
+    for (int i = 0; i < EXIT_TABLE; i++)
+        if (exits[i].pid == pid) return &exits[i];
+    return NULL;
+}
+
+static void record_exit(uint64_t pid, long status) {
+    exits[exit_next++ % EXIT_TABLE] = (struct exit_info){ pid, status };
+}
+
 /* Освобождаем завершённые задачи уже из контекста другой задачи:
  * на её собственном стеке и в её адресном пространстве это делать нельзя. */
 static void reap(void) {
@@ -54,7 +83,8 @@ static void reap(void) {
         struct task *z = zombies;
         zombies = z->zombie_next;
         for (int i = 0; i < MAX_FDS; i++)
-            if (z->fds[i]) kfree(z->fds[i]);
+            if (z->fds[i]) file_put(z->fds[i]);
+        if (z->cwd) vfs_node_put(z->cwd);
         if (z->pml4) vmm_destroy_address_space(z->pml4);
         kstack_free(z->stack);
         kfree(z);
@@ -133,17 +163,55 @@ void task_sleep_ms(uint32_t ms) {
     irq_restore(f);
 }
 
-void task_exit(void) {
+void task_exit_status(long status) {
     irq_save();                                  /* назад уже не вернёмся */
     if (current == &boot_task || current == idle_task)
         panic("task_exit: the main/idle thread must not exit");
 
+    record_exit(current->id, status);
     current->state = TASK_DEAD;
     ring_remove(current);
+
+    /* будим тех, кто ждёт именно этот процесс */
+    if (cursor) {
+        struct task *t = cursor;
+        do {
+            if (t->state == TASK_BLOCKED && t->wait_pid == current->id)
+                t->state = TASK_READY;
+            t = t->next;
+        } while (t != cursor);
+    }
+
     current->zombie_next = zombies;
     zombies = current;
     schedule();
     panic("task_exit: dead task was rescheduled");
+}
+
+void task_exit(void) {
+    task_exit_status(0);
+}
+
+/* Ждёт завершения процесса pid. 0 = успех (код в *status), -1 = такого процесса нет. */
+long task_wait(uint64_t pid, long *status) {
+    if (pid < 2) return -1;                      /* 0 = main, 1 = idle */
+
+    uint64_t f = irq_save();
+    for (;;) {
+        struct exit_info *e = find_exit(pid);
+        if (e) {
+            *status = e->status;
+            irq_restore(f);
+            return 0;
+        }
+        if (!find_task(pid) || pid == current->id) {
+            irq_restore(f);
+            return -1;
+        }
+        current->wait_pid = pid;
+        current->state = TASK_BLOCKED;
+        schedule();                              /* вернёмся, когда процесс завершится */
+    }
 }
 
 struct task *task_current(void) { return current; }
@@ -201,18 +269,27 @@ struct task *task_create(const char *name, void (*entry)(void *), void *arg) {
 /* Поток ядра процесса: сразу прыгает в ring 3 */
 static void user_entry(void *arg) {
     (void)arg;
-    enter_usermode(current->user_rip, current->user_rsp);
+    enter_usermode(current->user_rip, current->user_rsp,
+                   current->user_arg1, current->user_arg2);
 }
 
 /* Возвращает pid или -1. Указатель наружу не отдаём: после вставки в кольцо
  * задача может успеть завершиться и быть освобождена. */
-long task_create_user(const char *name, uint64_t *pml4, uint64_t rip, uint64_t rsp) {
+long task_create_user(const char *name, uint64_t *pml4, uint64_t rip, uint64_t rsp,
+                      uint64_t arg1, uint64_t arg2, const struct spawn_env *env) {
     struct task *t = make_task(name, user_entry, NULL);
     if (!t) return -1;
+
+    if (env) {                                   /* до ring_insert: ребёнок ещё не может запуститься */
+        t->cwd = env->cwd;
+        for (int i = 0; i < 3; i++) t->fds[i] = env->fds[i];
+    }
 
     t->pml4 = pml4;
     t->user_rip = rip;
     t->user_rsp = rsp;
+    t->user_arg1 = arg1;
+    t->user_arg2 = arg2;
 
     uint64_t f = irq_save();
     t->id = next_id++;
